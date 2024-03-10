@@ -8,17 +8,23 @@ import random
 import time
 from tqdm import tqdm
 import webbrowser
+
+
 class PDFCrackerGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("PDF Password Cracker")
         self.root.geometry("660x280")  # Adjust the window size
+        self.numbers_checked = tk.BooleanVar()
+        self.special_chars_checked = tk.BooleanVar()
+        self.letters_checked = tk.BooleanVar()
         # Create toolbar frame
 
         # Add donate button to toolbar
         self.donate_button = tk.Button(root, text="Donate", command=self.open_donation_link)
         self.donate_button.grid(row=0, column=6, padx=2, pady=2)
 
+        # PDF File
         self.pdf_file_label = tk.Label(root, text="PDF File:")
         self.pdf_file_label.grid(row=0, column=0, sticky=tk.W)
         self.pdf_file_entry = tk.Entry(root, width=25)
@@ -37,7 +43,6 @@ class PDFCrackerGUI:
         self.wordlist_entry = tk.Entry(root, width=25)
         self.wordlist_entry.grid(row=2, column=1, columnspan=3)
         self.wordlist_entry.bind("<KeyRelease>", self.validate_wordlist_entry)
-
         self.wordlist_button = tk.Button(root, text="Browse", command=self.browse_wordlist)
         self.wordlist_button.grid(row=2, column=4)  # This line was missing
 
@@ -60,9 +65,22 @@ class PDFCrackerGUI:
         self.incremental_display.grid(row=6, column=0, sticky=tk.W)
         self.incremental_status = tk.Label(root, text="")
         self.incremental_status.grid(row=7, column=0, columnspan=4, sticky=tk.W)
-        self.incremental_start_button = tk.Button(root, text="Start", command=self.start_incremental_crack, state=tk.DISABLED)
+
+        # Checkboxes for character sets
+        self.numbers_checkbox = tk.Checkbutton(root, text="Numbers", variable=self.numbers_checked, command=self.update_incremental_charset)
+        self.numbers_checkbox.grid(row=6, column=4, sticky=tk.W)
+        self.special_chars_checkbox = tk.Checkbutton(root, text="Special Characters", variable=self.special_chars_checked,
+                                                     command=self.update_incremental_charset)
+        self.special_chars_checkbox.grid(row=6, column=5, sticky=tk.W)
+        self.letters_checkbox = tk.Checkbutton(root, text="Letters",variable=self.letters_checked, command=self.update_incremental_charset)
+        self.letters_checkbox.grid(row=6, column=6, sticky=tk.W)
+        self.letters_checkbox.select()  # Default to including letters
+
+        self.incremental_start_button = tk.Button(root, text="Start", command=self.start_incremental_crack,
+                                                  state=tk.DISABLED)
         self.incremental_start_button.grid(row=7, column=5)
-        self.incremental_stop_button = tk.Button(root, text="Stop", command=self.stop_incremental_crack, state=tk.DISABLED)
+        self.incremental_stop_button = tk.Button(root, text="Stop", command=self.stop_incremental_crack,
+                                                 state=tk.DISABLED)
         self.incremental_stop_button.grid(row=7, column=6)
 
         # Divider3
@@ -90,7 +108,6 @@ class PDFCrackerGUI:
         # Random Status
         self.random_status = tk.Label(root, text="")
         self.random_status.grid(row=10, column=0, columnspan=7, sticky=tk.W)
-        self.divider3
 
         # Display found password
         self.found_password_label = tk.Label(root, text="Found Password:")
@@ -121,6 +138,16 @@ class PDFCrackerGUI:
                 self.wordlist_stop_button.config(state=tk.DISABLED)
             else:
                 self.wordlist_stop_button.config(state=tk.DISABLED)
+
+    def update_incremental_charset(self):
+        charset = ''
+        if self.numbers_checked.get():
+            charset += string.digits
+        if self.special_chars_checked.get():
+            charset += "!@#$%^&*()"
+        if self.letters_checked.get():
+            charset += string.ascii_letters
+        self.incremental_charset = charset
 
     def validate_min_length_entry(self, event):
         if self.pdf_file_entry.get() and self.min_length_entry.get() and self.max_length_entry.get():
@@ -173,6 +200,7 @@ class PDFCrackerGUI:
         self.incremental_stop_event.clear()
         pdf_file = self.pdf_file_entry.get()
         if pdf_file:
+            self.update_incremental_charset()
             self.incremental_thread = threading.Thread(target=self.crack_pdf_incremental, args=(pdf_file,))
             self.incremental_thread.start()
         else:
@@ -186,7 +214,8 @@ class PDFCrackerGUI:
         min_length = self.min_length_entry.get()
         max_length = self.max_length_entry.get()
         if pdf_file and min_length and max_length:
-            self.random_thread = threading.Thread(target=self.crack_pdf_random, args=(pdf_file, int(min_length), int(max_length)))
+            self.random_thread = threading.Thread(target=self.crack_pdf_random,
+                                                  args=(pdf_file, int(min_length), int(max_length)))
             self.random_thread.start()
         else:
             messagebox.showerror("Error", "Please select PDF file and specify min/max length.")
@@ -232,7 +261,8 @@ class PDFCrackerGUI:
                     self.found_password_display.delete(0, tk.END)
                     self.found_password_display.insert(tk.END, password)
                     self.found_password_display.config(state=tk.DISABLED)
-                    self.wordlist_status.config(text=f"Password found: {password} (Time taken: {elapsed_time:.2f} seconds)")
+                    self.wordlist_status.config(
+                        text=f"Password found: {password} (Time taken: {elapsed_time:.2f} seconds)")
                     self.password_found.set()
                     print("found")
                     return
@@ -242,11 +272,10 @@ class PDFCrackerGUI:
     def crack_pdf_incremental(self, pdf_file):
         self.incremental_status.config(text="Cracking...")
         start_time = time.time()
-        charset = string.ascii_letters + string.digits + "!@#$%^&*()"
         for password_length in range(1, 9):
             if self.incremental_stop_event.is_set():  # Check if stop event is set
                 break
-            for combination in itertools.product(charset, repeat=password_length):
+            for combination in itertools.product(self.incremental_charset, repeat=password_length):
                 if self.incremental_stop_event.is_set():  # Check if stop event is set
                     break
                 password = ''.join(combination)
@@ -258,7 +287,8 @@ class PDFCrackerGUI:
                         self.found_password_display.delete(0, tk.END)
                         self.found_password_display.insert(tk.END, password)
                         self.found_password_display.config(state=tk.DISABLED)
-                        self.incremental_status.config(text=f"Password found: {password} (Time taken: {elapsed_time:.2f} seconds)")
+                        self.incremental_status.config(
+                            text=f"Password found: {password} (Time taken: {elapsed_time:.2f} seconds)")
                         self.password_found.set()
                         print("found in")
                         return
@@ -290,6 +320,7 @@ class PDFCrackerGUI:
     def generate_password(self, length):
         """Generate a random password of given length"""
         return ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(length))
+
 
 if __name__ == "__main__":
     root = tk.Tk()
