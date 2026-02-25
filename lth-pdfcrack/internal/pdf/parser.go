@@ -66,15 +66,12 @@ func ExtractEncryptionInfo(filename string) (*EncryptionInfo, error) {
 		info.PDFVersion = string(versionMatch[1])
 	}
 
-	encryptMatch := regexp.MustCompile(`/Encrypt\s+(\d+)\s+\d+\s+R`).FindSubmatch(data)
-	if encryptMatch == nil {
-		encryptMatch = regexp.MustCompile(`/Encrypt\s*<<`).FindSubmatch(data)
-		if encryptMatch == nil {
-			return nil, ErrNotEncrypted
-		}
+	encryptDict, err := findEncryptDict(data)
+	if err != nil {
+		return nil, err
 	}
 
-	if err := parseEncryptDict(data, info); err != nil {
+	if err := parseEncryptDict(data, encryptDict, info); err != nil {
 		return nil, err
 	}
 
@@ -85,62 +82,104 @@ func ExtractEncryptionInfo(filename string) (*EncryptionInfo, error) {
 	return info, nil
 }
 
-func parseEncryptDict(data []byte, info *EncryptionInfo) error {
-	vMatch := regexp.MustCompile(`/V\s+(\d+)`).FindSubmatch(data)
+func findEncryptDict(data []byte) ([]byte, error) {
+	encryptRefMatch := regexp.MustCompile(`/Encrypt\s+(\d+)\s+(\d+)\s+R`).FindSubmatch(data)
+	if encryptRefMatch != nil {
+		objNum := string(encryptRefMatch[1])
+		objPattern := regexp.MustCompile(objNum + `\s+\d+\s+obj\s*<<([\s\S]*?)>>\s*endobj`)
+		objMatch := objPattern.FindSubmatch(data)
+		if objMatch != nil {
+			return objMatch[1], nil
+		}
+		
+		objPattern2 := regexp.MustCompile(objNum + `\s+\d+\s+obj\s*<<([\s\S]*?)>>`)
+		objMatch2 := objPattern2.FindSubmatch(data)
+		if objMatch2 != nil {
+			return objMatch2[1], nil
+		}
+	}
+
+	inlineMatch := regexp.MustCompile(`/Encrypt\s*<<([\s\S]*?)>>`).FindSubmatch(data)
+	if inlineMatch != nil {
+		return inlineMatch[1], nil
+	}
+
+	return nil, ErrNotEncrypted
+}
+
+func parseEncryptDict(fullData []byte, encryptDict []byte, info *EncryptionInfo) error {
+	vMatch := regexp.MustCompile(`/V\s+(\d+)`).FindSubmatch(encryptDict)
 	if vMatch != nil {
 		info.Version, _ = strconv.Atoi(string(vMatch[1]))
 	}
 
-	rMatch := regexp.MustCompile(`/R\s+(\d+)`).FindSubmatch(data)
+	rMatch := regexp.MustCompile(`/R\s+(\d+)`).FindSubmatch(encryptDict)
 	if rMatch != nil {
 		info.Revision, _ = strconv.Atoi(string(rMatch[1]))
 	}
 
-	lengthMatch := regexp.MustCompile(`/Length\s+(\d+)`).FindSubmatch(data)
+	lengthMatch := regexp.MustCompile(`/Length\s+(\d+)`).FindSubmatch(encryptDict)
 	if lengthMatch != nil {
-		info.Length, _ = strconv.Atoi(string(lengthMatch[1]))
+		length, _ := strconv.Atoi(string(lengthMatch[1]))
+		if length >= 40 && length <= 256 {
+			info.Length = length
+		} else if length > 0 && length <= 32 {
+			info.Length = length * 8
+		} else {
+			info.Length = 128
+		}
 	} else {
-		info.Length = 40
+		if info.Version >= 4 {
+			info.Length = 128
+		} else if info.Version >= 2 {
+			info.Length = 128
+		} else {
+			info.Length = 40
+		}
 	}
 
-	pMatch := regexp.MustCompile(`/P\s+(-?\d+)`).FindSubmatch(data)
+	pMatch := regexp.MustCompile(`/P\s+(-?\d+)`).FindSubmatch(encryptDict)
 	if pMatch != nil {
 		p, _ := strconv.ParseInt(string(pMatch[1]), 10, 32)
 		info.Permissions = int32(p)
 	}
 
-	oMatch := regexp.MustCompile(`/O\s*[<(]([^>)]+)[>)]`).FindSubmatch(data)
+	oMatch := regexp.MustCompile(`/O\s*[<(]([^>)]+)[>)]`).FindSubmatch(encryptDict)
 	if oMatch != nil {
 		info.OwnerHash = parseHexOrLiteral(oMatch[1])
 	}
 
-	uMatch := regexp.MustCompile(`/U\s*[<(]([^>)]+)[>)]`).FindSubmatch(data)
+	uMatch := regexp.MustCompile(`/U\s*[<(]([^>)]+)[>)]`).FindSubmatch(encryptDict)
 	if uMatch != nil {
 		info.UserHash = parseHexOrLiteral(uMatch[1])
 	}
 
 	info.IsAES = false
 	
-	cfmMatch := regexp.MustCompile(`/CFM\s*/AESV2`).FindSubmatch(data)
+	cfmMatch := regexp.MustCompile(`/CFM\s*/AESV2`).FindSubmatch(encryptDict)
 	if cfmMatch != nil {
 		info.IsAES = true
 	}
 	
-	cfmMatch3 := regexp.MustCompile(`/CFM\s*/AESV3`).FindSubmatch(data)
+	cfmMatch = regexp.MustCompile(`/CFM\s*/AESV2`).FindSubmatch(fullData)
+	if cfmMatch != nil {
+		info.IsAES = true
+	}
+	
+	cfmMatch3 := regexp.MustCompile(`/CFM\s*/AESV3`).FindSubmatch(fullData)
 	if cfmMatch3 != nil {
 		info.IsAES = true
 	}
 
-	stmFMatch := regexp.MustCompile(`/StmF\s*/StdCF`).FindSubmatch(data)
-	strFMatch := regexp.MustCompile(`/StrF\s*/StdCF`).FindSubmatch(data)
-	if stmFMatch != nil || strFMatch != nil {
-		aesInCF := regexp.MustCompile(`/StdCF\s*<<[^>]*?/CFM\s*/AESV2`).FindSubmatch(data)
-		if aesInCF != nil {
+	stmFMatch := regexp.MustCompile(`/StmF\s*/StdCF`).FindSubmatch(encryptDict)
+	if stmFMatch != nil {
+		stdcfMatch := regexp.MustCompile(`/StdCF\s*<<[^>]*?/CFM\s*/AESV2`).FindSubmatch(fullData)
+		if stdcfMatch != nil {
 			info.IsAES = true
 		}
 	}
 
-	encryptMetaMatch := regexp.MustCompile(`/EncryptMetadata\s+(true|false)`).FindSubmatch(data)
+	encryptMetaMatch := regexp.MustCompile(`/EncryptMetadata\s+(true|false)`).FindSubmatch(encryptDict)
 	if encryptMetaMatch != nil {
 		info.EncryptMeta = string(encryptMetaMatch[1]) == "true"
 	} else {
@@ -158,9 +197,15 @@ func parseEncryptDict(data []byte, info *EncryptionInfo) error {
 }
 
 func parseFileID(data []byte, info *EncryptionInfo) error {
-	idMatch := regexp.MustCompile(`/ID\s*\[\s*[<(]([^>)]+)[>)]`).FindSubmatch(data)
+	idMatch := regexp.MustCompile(`/ID\s*\[\s*<([0-9A-Fa-f]+)>`).FindSubmatch(data)
 	if idMatch != nil {
 		info.FileID = parseHexOrLiteral(idMatch[1])
+		return nil
+	}
+	
+	idMatch = regexp.MustCompile(`/ID\s*\[\s*\(([^)]+)\)`).FindSubmatch(data)
+	if idMatch != nil {
+		info.FileID = unescapePDFString(idMatch[1])
 	}
 	return nil
 }
@@ -331,6 +376,12 @@ func (info *EncryptionInfo) verifyUserPasswordRC4(key []byte) bool {
 func (info *EncryptionInfo) verifyUserPasswordAES(key []byte) bool {
 	if len(info.UserHash) < 32 {
 		return false
+	}
+	
+	if len(key) != 16 {
+		newKey := make([]byte, 16)
+		copy(newKey, key)
+		key = newKey
 	}
 
 	iv := info.UserHash[:16]
