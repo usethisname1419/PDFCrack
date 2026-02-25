@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,18 +19,21 @@ import (
 )
 
 var (
-	version = "1.0.0"
-	
-	pdfFile     string
-	wordlist    string
-	charset     string
-	minLength   int
-	maxLength   int
-	workers     int
-	useGPU      bool
-	batchSize   int
-	mode        string
-	verbose     bool
+	version = "1.1.0"
+
+	pdfFile   string
+	wordlist  string
+	charset   string
+	minLength int
+	maxLength int
+	workers   int
+	useGPU    bool
+	batchSize int
+	verbose   bool
+
+	useWordlist    bool
+	useIncremental bool
+	useRandom      bool
 )
 
 func main() {
@@ -40,20 +44,32 @@ func main() {
 A high-performance PDF password recovery tool written in Go.
 Supports CPU multi-threading and optional GPU acceleration.
 
-Supports PDF encryption versions 1-4 (R2-R4).`,
+Run one or more attack modes simultaneously:
+  --wordlist (-W)     Dictionary attack using a wordlist file
+  --incremental (-I)  Brute-force through all combinations  
+  --random (-R)       Random password generation
+
+Examples:
+  pdfcrack -f doc.pdf -W -w rockyou.txt              # Wordlist only
+  pdfcrack -f doc.pdf -I -c digits -m 4 -M 6         # Incremental only
+  pdfcrack -f doc.pdf -W -I -w list.txt              # Wordlist + Incremental
+  pdfcrack -f doc.pdf -W -I -R -w list.txt           # All three modes`,
 		Run: runCracker,
 	}
 
 	rootCmd.Flags().StringVarP(&pdfFile, "file", "f", "", "PDF file to crack (required)")
-	rootCmd.Flags().StringVarP(&wordlist, "wordlist", "w", "", "Wordlist file for dictionary attack")
-	rootCmd.Flags().StringVarP(&charset, "charset", "c", "alnum", "Character set: lower, upper, digits, alnum, all, or custom string")
-	rootCmd.Flags().IntVarP(&minLength, "min", "m", 1, "Minimum password length for brute-force")
-	rootCmd.Flags().IntVarP(&maxLength, "max", "M", 8, "Maximum password length for brute-force")
+	rootCmd.Flags().StringVarP(&wordlist, "wordlist-file", "w", "", "Wordlist file for dictionary attack")
+	rootCmd.Flags().StringVarP(&charset, "charset", "c", "alnum", "Character set: lower, upper, digits, alnum, all, or custom")
+	rootCmd.Flags().IntVarP(&minLength, "min", "m", 1, "Minimum password length")
+	rootCmd.Flags().IntVarP(&maxLength, "max", "M", 8, "Maximum password length")
 	rootCmd.Flags().IntVarP(&workers, "workers", "t", runtime.NumCPU(), "Number of CPU worker threads")
 	rootCmd.Flags().BoolVarP(&useGPU, "gpu", "g", false, "Enable GPU acceleration (requires OpenCL)")
 	rootCmd.Flags().IntVarP(&batchSize, "batch", "b", 10000, "GPU batch size")
-	rootCmd.Flags().StringVarP(&mode, "mode", "a", "wordlist", "Attack mode: wordlist, incremental, random")
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output")
+
+	rootCmd.Flags().BoolVarP(&useWordlist, "use-wordlist", "W", false, "Enable wordlist/dictionary attack")
+	rootCmd.Flags().BoolVarP(&useIncremental, "use-incremental", "I", false, "Enable incremental brute-force attack")
+	rootCmd.Flags().BoolVarP(&useRandom, "use-random", "R", false, "Enable random password attack")
 
 	rootCmd.MarkFlagRequired("file")
 
@@ -113,7 +129,7 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	fmt.Printf("Benchmarking with %d workers...\n", workers)
 
 	c := cracker.New(encInfo, workers)
-	
+
 	testPasswords := make([]string, 100000)
 	for i := range testPasswords {
 		testPasswords[i] = fmt.Sprintf("test%d", i)
@@ -149,10 +165,31 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	}
 }
 
+type attackResult struct {
+	mode     string
+	result   cracker.Result
+}
+
 func runCracker(cmd *cobra.Command, args []string) {
 	if pdfFile == "" {
 		cmd.Help()
 		return
+	}
+
+	if !useWordlist && !useIncremental && !useRandom {
+		fmt.Fprintln(os.Stderr, "Error: No attack mode selected.")
+		fmt.Fprintln(os.Stderr, "Use one or more of: -W (wordlist), -I (incremental), -R (random)")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Examples:")
+		fmt.Fprintln(os.Stderr, "  pdfcrack -f doc.pdf -W -w wordlist.txt")
+		fmt.Fprintln(os.Stderr, "  pdfcrack -f doc.pdf -I -c digits -m 4 -M 6")
+		fmt.Fprintln(os.Stderr, "  pdfcrack -f doc.pdf -W -I -R -w wordlist.txt")
+		os.Exit(1)
+	}
+
+	if useWordlist && wordlist == "" {
+		fmt.Fprintln(os.Stderr, "Error: Wordlist mode requires -w <wordlist_file>")
+		os.Exit(1)
 	}
 
 	fmt.Printf("LTH PDF Password Cracker v%s\n", version)
@@ -166,8 +203,19 @@ func runCracker(cmd *cobra.Command, args []string) {
 
 	fmt.Printf("File: %s\n", pdfFile)
 	fmt.Printf("Encryption: %s\n", encInfo.String())
-	fmt.Printf("Workers: %d\n", workers)
-	fmt.Println()
+
+	var modes []string
+	if useWordlist {
+		modes = append(modes, "Wordlist")
+	}
+	if useIncremental {
+		modes = append(modes, "Incremental")
+	}
+	if useRandom {
+		modes = append(modes, "Random")
+	}
+	fmt.Printf("Modes: %s\n", strings.Join(modes, " + "))
+	fmt.Printf("Workers: %d per mode\n", workers)
 
 	var gpuCracker *gpu.GPUCracker
 	if useGPU {
@@ -182,6 +230,10 @@ func runCracker(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	fmt.Println()
+	fmt.Println("Starting attack(s)... Press Ctrl+C to stop.")
+	fmt.Println()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -189,99 +241,170 @@ func runCracker(cmd *cobra.Command, args []string) {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		fmt.Println("\nInterrupted - stopping...")
+		fmt.Println("\n\nInterrupted - stopping all attacks...")
 		cancel()
 	}()
 
-	c := cracker.New(encInfo, workers)
-	
-	lastReport := time.Now()
-	c.SetProgressCallback(func(p cracker.Progress) {
-		if time.Since(lastReport) > 500*time.Millisecond {
-			fmt.Printf("\r[%s] %d attempts | %.0f p/s | Current: %s",
-				formatDuration(p.ElapsedTime), p.Attempts, p.Rate, truncate(p.Current, 20))
-			lastReport = time.Now()
-		}
-	})
+	resultChan := make(chan attackResult, 3)
+	var wg sync.WaitGroup
 
-	var result cracker.Result
+	statusMu := sync.Mutex{}
+	statuses := make(map[string]string)
 
-	switch mode {
-	case "wordlist":
-		if wordlist == "" {
-			fmt.Fprintln(os.Stderr, "Error: Wordlist required for wordlist mode (-w)")
-			os.Exit(1)
-		}
-		fmt.Printf("Mode: Wordlist attack (%s)\n", wordlist)
-		
-		if useGPU && gpuCracker != nil {
-			result = crackWithGPU(ctx, gpuCracker, wordlist)
-		} else {
-			passwords, err := attacks.WordlistGenerator(ctx, wordlist)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+	updateStatus := func(mode, status string) {
+		statusMu.Lock()
+		statuses[mode] = status
+		printStatuses(statuses)
+		statusMu.Unlock()
+	}
+
+	if useWordlist {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result := runWordlistAttack(ctx, encInfo, gpuCracker, updateStatus)
+			resultChan <- attackResult{mode: "Wordlist", result: result}
+			if result.Found {
+				cancel()
 			}
-			result = c.CrackWithWordlist(ctx, passwords)
-		}
-
-	case "incremental":
-		charsetStr := resolveCharset(charset)
-		config := attacks.IncrementalConfig{
-			Charset:   charsetStr,
-			MinLength: minLength,
-			MaxLength: maxLength,
-		}
-		
-		estimate := attacks.EstimateCombinations(config)
-		fmt.Printf("Mode: Incremental brute-force\n")
-		fmt.Printf("Charset: %d characters, Length: %d-%d\n", len(charsetStr), minLength, maxLength)
-		fmt.Printf("Estimated combinations: %d\n", estimate)
-		
-		generator := func(ctx context.Context) <-chan string {
-			return attacks.IncrementalGenerator(ctx, config)
-		}
-		result = c.CrackWithGenerator(ctx, generator)
-
-	case "random":
-		charsetStr := resolveCharset(charset)
-		config := attacks.RandomConfig{
-			Charset:   charsetStr,
-			MinLength: minLength,
-			MaxLength: maxLength,
-		}
-		
-		fmt.Printf("Mode: Random attack\n")
-		fmt.Printf("Charset: %d characters, Length: %d-%d\n", len(charsetStr), minLength, maxLength)
-		
-		generator := func(ctx context.Context) <-chan string {
-			return attacks.RandomGenerator(ctx, config)
-		}
-		result = c.CrackWithGenerator(ctx, generator)
-
-	default:
-		fmt.Fprintf(os.Stderr, "Error: Unknown mode '%s'\n", mode)
-		os.Exit(1)
+		}()
 	}
 
-	fmt.Println()
-	fmt.Println()
+	if useIncremental {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result := runIncrementalAttack(ctx, encInfo, updateStatus)
+			resultChan <- attackResult{mode: "Incremental", result: result}
+			if result.Found {
+				cancel()
+			}
+		}()
+	}
 
-	if result.Found {
-		fmt.Println("================================")
-		fmt.Printf("PASSWORD FOUND: %s\n", result.Password)
-		fmt.Println("================================")
-		fmt.Printf("Time: %s\n", formatDuration(result.Duration))
-		fmt.Printf("Attempts: %d\n", result.Attempts)
-		fmt.Printf("Rate: %.0f passwords/second\n", float64(result.Attempts)/result.Duration.Seconds())
+	if useRandom {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result := runRandomAttack(ctx, encInfo, updateStatus)
+			resultChan <- attackResult{mode: "Random", result: result}
+			if result.Found {
+				cancel()
+			}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	var foundResult *attackResult
+	var allResults []attackResult
+
+	for res := range resultChan {
+		allResults = append(allResults, res)
+		if res.result.Found && foundResult == nil {
+			foundResult = &res
+		}
+	}
+
+	fmt.Println("\n")
+	fmt.Println("================================")
+	fmt.Println("RESULTS")
+	fmt.Println("================================")
+
+	if foundResult != nil {
+		fmt.Printf("\nPASSWORD FOUND: %s\n", foundResult.result.Password)
+		fmt.Printf("Found by: %s attack\n", foundResult.mode)
+		fmt.Printf("Time: %s\n", formatDuration(foundResult.result.Duration))
+		fmt.Printf("Attempts: %d\n", foundResult.result.Attempts)
 	} else {
-		fmt.Println("Password not found.")
-		fmt.Printf("Attempts: %d\n", result.Attempts)
-		fmt.Printf("Time: %s\n", formatDuration(result.Duration))
+		fmt.Println("\nPassword not found.")
 	}
+
+	fmt.Println("\nPer-mode statistics:")
+	var totalAttempts uint64
+	for _, res := range allResults {
+		rate := float64(res.result.Attempts) / res.result.Duration.Seconds()
+		fmt.Printf("  %-12s: %d attempts in %s (%.0f p/s)\n",
+			res.mode, res.result.Attempts, formatDuration(res.result.Duration), rate)
+		totalAttempts += res.result.Attempts
+	}
+	fmt.Printf("\nTotal attempts: %d\n", totalAttempts)
 }
 
-func crackWithGPU(ctx context.Context, gpuCracker *gpu.GPUCracker, wordlistFile string) cracker.Result {
+func printStatuses(statuses map[string]string) {
+	var parts []string
+	for mode, status := range statuses {
+		parts = append(parts, fmt.Sprintf("[%s] %s", mode[:1], status))
+	}
+	fmt.Printf("\r%-100s", strings.Join(parts, " | "))
+}
+
+func runWordlistAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, gpuCracker *gpu.GPUCracker, updateStatus func(string, string)) cracker.Result {
+	c := cracker.New(encInfo, workers)
+	
+	c.SetProgressCallback(func(p cracker.Progress) {
+		updateStatus("Wordlist", fmt.Sprintf("%d @ %.0f/s: %s", p.Attempts, p.Rate, truncate(p.Current, 12)))
+	})
+
+	if useGPU && gpuCracker != nil {
+		return crackWithGPU(ctx, gpuCracker, wordlist, updateStatus)
+	}
+
+	passwords, err := attacks.WordlistGenerator(ctx, wordlist)
+	if err != nil {
+		updateStatus("Wordlist", fmt.Sprintf("Error: %v", err))
+		return cracker.Result{}
+	}
+
+	return c.CrackWithWordlist(ctx, passwords)
+}
+
+func runIncrementalAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, updateStatus func(string, string)) cracker.Result {
+	c := cracker.New(encInfo, workers)
+
+	charsetStr := resolveCharset(charset)
+	config := attacks.IncrementalConfig{
+		Charset:   charsetStr,
+		MinLength: minLength,
+		MaxLength: maxLength,
+	}
+
+	c.SetProgressCallback(func(p cracker.Progress) {
+		updateStatus("Incremental", fmt.Sprintf("%d @ %.0f/s: %s", p.Attempts, p.Rate, truncate(p.Current, 12)))
+	})
+
+	generator := func(ctx context.Context) <-chan string {
+		return attacks.IncrementalGenerator(ctx, config)
+	}
+
+	return c.CrackWithGenerator(ctx, generator)
+}
+
+func runRandomAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, updateStatus func(string, string)) cracker.Result {
+	c := cracker.New(encInfo, workers)
+
+	charsetStr := resolveCharset(charset)
+	config := attacks.RandomConfig{
+		Charset:   charsetStr,
+		MinLength: minLength,
+		MaxLength: maxLength,
+	}
+
+	c.SetProgressCallback(func(p cracker.Progress) {
+		updateStatus("Random", fmt.Sprintf("%d @ %.0f/s: %s", p.Attempts, p.Rate, truncate(p.Current, 12)))
+	})
+
+	generator := func(ctx context.Context) <-chan string {
+		return attacks.RandomGenerator(ctx, config)
+	}
+
+	return c.CrackWithGenerator(ctx, generator)
+}
+
+func crackWithGPU(ctx context.Context, gpuCracker *gpu.GPUCracker, wordlistFile string, updateStatus func(string, string)) cracker.Result {
 	start := time.Now()
 	var attempts uint64
 
@@ -291,7 +414,7 @@ func crackWithGPU(ctx context.Context, gpuCracker *gpu.GPUCracker, wordlistFile 
 	}
 
 	batch := make([]string, 0, batchSize)
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -330,11 +453,11 @@ func crackWithGPU(ctx context.Context, gpuCracker *gpu.GPUCracker, wordlistFile 
 				}
 				attempts += uint64(len(batch))
 				batch = batch[:0]
-				
+
 				if attempts%100000 == 0 {
 					elapsed := time.Since(start)
 					rate := float64(attempts) / elapsed.Seconds()
-					fmt.Printf("\r[GPU] %d attempts | %.0f p/s", attempts, rate)
+					updateStatus("Wordlist", fmt.Sprintf("[GPU] %d @ %.0f/s", attempts, rate))
 				}
 			}
 		}

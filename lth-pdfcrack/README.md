@@ -6,13 +6,13 @@ A high-performance PDF password recovery tool written in Go with optional GPU ac
 
 - **Fast CPU-based cracking** with multi-threaded worker pool
 - **Optional GPU acceleration** via OpenCL (up to 47x speedup)
-- **Multiple attack modes:**
-  - Wordlist/dictionary attack
-  - Incremental brute-force
-  - Random password generation
+- **Simultaneous attack modes** - run 1, 2, or all 3 modes at once:
+  - `-W` Wordlist/dictionary attack
+  - `-I` Incremental brute-force
+  - `-R` Random password generation
 - **PDF encryption support:** V1-V4, R2-R4 (PDF 1.1 - 1.7)
 - **Cross-platform:** Windows, Linux, macOS
-- **Progress reporting** with real-time statistics
+- **Real-time progress** for each attack mode
 
 ## Installation
 
@@ -59,17 +59,23 @@ sudo apt install intel-opencl-icd
 ### Basic Usage
 
 ```bash
-# Dictionary attack
-pdfcrack -f encrypted.pdf -w wordlist.txt
+# Single mode - Wordlist only
+pdfcrack -f encrypted.pdf -W -w wordlist.txt
 
-# Incremental brute-force (1-6 character passwords)
-pdfcrack -f encrypted.pdf -a incremental -m 1 -M 6
+# Single mode - Incremental brute-force (4-6 digit PIN)
+pdfcrack -f encrypted.pdf -I -c digits -m 4 -M 6
 
-# Random attack with specific charset
-pdfcrack -f encrypted.pdf -a random -c digits -m 4 -M 8
+# Single mode - Random attack
+pdfcrack -f encrypted.pdf -R -c alnum -m 1 -M 8
 
-# Use GPU acceleration
-pdfcrack -f encrypted.pdf -w wordlist.txt --gpu
+# Two modes - Wordlist + Incremental simultaneously
+pdfcrack -f encrypted.pdf -W -I -w wordlist.txt -c alnum -m 1 -M 6
+
+# All three modes at once
+pdfcrack -f encrypted.pdf -W -I -R -w wordlist.txt -c alnum -m 1 -M 8
+
+# With GPU acceleration (wordlist mode)
+pdfcrack -f encrypted.pdf -W -w wordlist.txt --gpu
 ```
 
 ### Commands
@@ -90,12 +96,14 @@ pdfcrack benchmark -f encrypted.pdf --gpu
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-f, --file` | PDF file to crack (required) | - |
-| `-w, --wordlist` | Wordlist file for dictionary attack | - |
-| `-a, --mode` | Attack mode: wordlist, incremental, random | wordlist |
+| `-W, --use-wordlist` | Enable wordlist attack mode | false |
+| `-I, --use-incremental` | Enable incremental attack mode | false |
+| `-R, --use-random` | Enable random attack mode | false |
+| `-w, --wordlist-file` | Wordlist file (required for -W) | - |
 | `-c, --charset` | Character set (see below) | alnum |
 | `-m, --min` | Minimum password length | 1 |
 | `-M, --max` | Maximum password length | 8 |
-| `-t, --workers` | Number of CPU threads | auto |
+| `-t, --workers` | CPU threads per attack mode | auto |
 | `-g, --gpu` | Enable GPU acceleration | false |
 | `-b, --batch` | GPU batch size | 10000 |
 | `-v, --verbose` | Verbose output | false |
@@ -128,16 +136,19 @@ Typical performance on modern hardware:
 
 ```bash
 # Crack with rockyou wordlist
-pdfcrack -f secret.pdf -w /usr/share/wordlists/rockyou.txt
+pdfcrack -f secret.pdf -W -w /usr/share/wordlists/rockyou.txt
 
 # Brute-force 4-digit PIN
-pdfcrack -f bank.pdf -a incremental -c digits -m 4 -M 4
+pdfcrack -f bank.pdf -I -c digits -m 4 -M 4
 
 # Brute-force with custom charset
-pdfcrack -f doc.pdf -a incremental -c "abc123!@#" -m 1 -M 6
+pdfcrack -f doc.pdf -I -c "abc123!@#" -m 1 -M 6
 
-# Maximum performance with GPU
-pdfcrack -f doc.pdf -w huge_wordlist.txt --gpu -b 50000
+# Maximum coverage - all modes at once
+pdfcrack -f doc.pdf -W -I -R -w rockyou.txt -c alnum -m 1 -M 8
+
+# GPU-accelerated wordlist + incremental
+pdfcrack -f doc.pdf -W -I -w huge_wordlist.txt --gpu -b 50000
 ```
 
 ## Supported PDF Versions
@@ -164,6 +175,11 @@ GPU acceleration moves the computationally intensive MD5/RC4 operations to the G
 Internal LTH tool. All rights reserved.
 
 ## Changelog
+
+### v1.1.0
+- Simultaneous multi-mode attacks (-W -I -R flags)
+- Real-time per-mode progress display
+- Improved CLI interface
 
 ### v1.0.0
 - Initial release
