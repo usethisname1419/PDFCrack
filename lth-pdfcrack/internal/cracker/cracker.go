@@ -103,7 +103,7 @@ func (c *Cracker) CrackWithWordlist(ctx context.Context, passwords <-chan string
 						return
 					}
 					
-					if atomic.LoadUint64(&c.attempts)%10000 == 0 {
+					if atomic.LoadUint64(&c.attempts)%1000 == 0 {
 						c.reportProgress(password)
 					}
 				}

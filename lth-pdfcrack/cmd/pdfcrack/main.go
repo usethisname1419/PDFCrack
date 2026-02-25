@@ -19,7 +19,7 @@ import (
 )
 
 var (
-	version = "1.1.0"
+	version = "1.2.0"
 
 	pdfFile   string
 	wordlist  string
@@ -35,6 +35,18 @@ var (
 	useIncremental bool
 	useRandom      bool
 )
+
+type modeStatus struct {
+	attempts uint64
+	rate     float64
+	current  string
+	active   bool
+}
+
+type attackResult struct {
+	mode   string
+	result cracker.Result
+}
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -165,11 +177,6 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	}
 }
 
-type attackResult struct {
-	mode     string
-	result   cracker.Result
-}
-
 func runCracker(cmd *cobra.Command, args []string) {
 	if pdfFile == "" {
 		cmd.Help()
@@ -234,6 +241,25 @@ func runCracker(cmd *cobra.Command, args []string) {
 	fmt.Println("Starting attack(s)... Press Ctrl+C to stop.")
 	fmt.Println()
 
+	numModes := 0
+	if useWordlist {
+		numModes++
+	}
+	if useIncremental {
+		numModes++
+	}
+	if useRandom {
+		numModes++
+	}
+
+	fmt.Println("┌─────────────┬──────────────┬──────────────┬──────────────────────┐")
+	fmt.Println("│ Mode        │ Attempts     │ Speed        │ Current              │")
+	fmt.Println("├─────────────┼──────────────┼──────────────┼──────────────────────┤")
+	for i := 0; i < numModes; i++ {
+		fmt.Println("│             │              │              │                      │")
+	}
+	fmt.Println("└─────────────┴──────────────┴──────────────┴──────────────────────┘")
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -241,7 +267,6 @@ func runCracker(cmd *cobra.Command, args []string) {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		fmt.Println("\n\nInterrupted - stopping all attacks...")
 		cancel()
 	}()
 
@@ -249,14 +274,41 @@ func runCracker(cmd *cobra.Command, args []string) {
 	var wg sync.WaitGroup
 
 	statusMu := sync.Mutex{}
-	statuses := make(map[string]string)
+	statuses := map[string]*modeStatus{
+		"Wordlist":    {active: useWordlist},
+		"Incremental": {active: useIncremental},
+		"Random":      {active: useRandom},
+	}
 
-	updateStatus := func(mode, status string) {
+	updateStatus := func(mode string, attempts uint64, rate float64, current string) {
 		statusMu.Lock()
-		statuses[mode] = status
-		printStatuses(statuses)
+		if s, ok := statuses[mode]; ok {
+			s.attempts = attempts
+			s.rate = rate
+			s.current = current
+		}
 		statusMu.Unlock()
 	}
+
+	stopDisplay := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+
+		fmt.Print("\033[?25l")
+
+		for {
+			select {
+			case <-stopDisplay:
+				fmt.Print("\033[?25h")
+				return
+			case <-ticker.C:
+				statusMu.Lock()
+				printStatusTable(statuses, numModes)
+				statusMu.Unlock()
+			}
+		}
+	}()
 
 	if useWordlist {
 		wg.Add(1)
@@ -296,6 +348,7 @@ func runCracker(cmd *cobra.Command, args []string) {
 
 	go func() {
 		wg.Wait()
+		close(stopDisplay)
 		close(resultChan)
 	}()
 
@@ -309,13 +362,15 @@ func runCracker(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	fmt.Println("\n")
+	fmt.Print("\033[?25h")
+	fmt.Println()
+	fmt.Println()
 	fmt.Println("================================")
 	fmt.Println("RESULTS")
 	fmt.Println("================================")
 
 	if foundResult != nil {
-		fmt.Printf("\nPASSWORD FOUND: %s\n", foundResult.result.Password)
+		fmt.Printf("\n*** PASSWORD FOUND: %s ***\n", foundResult.result.Password)
 		fmt.Printf("Found by: %s attack\n", foundResult.mode)
 		fmt.Printf("Time: %s\n", formatDuration(foundResult.result.Duration))
 		fmt.Printf("Attempts: %d\n", foundResult.result.Attempts)
@@ -334,19 +389,25 @@ func runCracker(cmd *cobra.Command, args []string) {
 	fmt.Printf("\nTotal attempts: %d\n", totalAttempts)
 }
 
-func printStatuses(statuses map[string]string) {
-	var parts []string
-	for mode, status := range statuses {
-		parts = append(parts, fmt.Sprintf("[%s] %s", mode[:1], status))
+func printStatusTable(statuses map[string]*modeStatus, numModes int) {
+	fmt.Printf("\033[%dA", numModes+1)
+
+	modeOrder := []string{"Wordlist", "Incremental", "Random"}
+	for _, mode := range modeOrder {
+		s := statuses[mode]
+		if s.active {
+			fmt.Printf("\r│ %-11s │ %12d │ %10.0f/s │ %-20s │\033[K\n",
+				mode, s.attempts, s.rate, truncate(s.current, 20))
+		}
 	}
-	fmt.Printf("\r%-100s", strings.Join(parts, " | "))
+	fmt.Print("└─────────────┴──────────────┴──────────────┴──────────────────────┘\033[K")
 }
 
-func runWordlistAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, gpuCracker *gpu.GPUCracker, updateStatus func(string, string)) cracker.Result {
+func runWordlistAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, gpuCracker *gpu.GPUCracker, updateStatus func(string, uint64, float64, string)) cracker.Result {
 	c := cracker.New(encInfo, workers)
-	
+
 	c.SetProgressCallback(func(p cracker.Progress) {
-		updateStatus("Wordlist", fmt.Sprintf("%d @ %.0f/s: %s", p.Attempts, p.Rate, truncate(p.Current, 12)))
+		updateStatus("Wordlist", p.Attempts, p.Rate, p.Current)
 	})
 
 	if useGPU && gpuCracker != nil {
@@ -355,14 +416,14 @@ func runWordlistAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, gpuCrac
 
 	passwords, err := attacks.WordlistGenerator(ctx, wordlist)
 	if err != nil {
-		updateStatus("Wordlist", fmt.Sprintf("Error: %v", err))
+		updateStatus("Wordlist", 0, 0, fmt.Sprintf("Error: %v", err))
 		return cracker.Result{}
 	}
 
 	return c.CrackWithWordlist(ctx, passwords)
 }
 
-func runIncrementalAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, updateStatus func(string, string)) cracker.Result {
+func runIncrementalAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, updateStatus func(string, uint64, float64, string)) cracker.Result {
 	c := cracker.New(encInfo, workers)
 
 	charsetStr := resolveCharset(charset)
@@ -373,7 +434,7 @@ func runIncrementalAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, upda
 	}
 
 	c.SetProgressCallback(func(p cracker.Progress) {
-		updateStatus("Incremental", fmt.Sprintf("%d @ %.0f/s: %s", p.Attempts, p.Rate, truncate(p.Current, 12)))
+		updateStatus("Incremental", p.Attempts, p.Rate, p.Current)
 	})
 
 	generator := func(ctx context.Context) <-chan string {
@@ -383,7 +444,7 @@ func runIncrementalAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, upda
 	return c.CrackWithGenerator(ctx, generator)
 }
 
-func runRandomAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, updateStatus func(string, string)) cracker.Result {
+func runRandomAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, updateStatus func(string, uint64, float64, string)) cracker.Result {
 	c := cracker.New(encInfo, workers)
 
 	charsetStr := resolveCharset(charset)
@@ -394,7 +455,7 @@ func runRandomAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, updateSta
 	}
 
 	c.SetProgressCallback(func(p cracker.Progress) {
-		updateStatus("Random", fmt.Sprintf("%d @ %.0f/s: %s", p.Attempts, p.Rate, truncate(p.Current, 12)))
+		updateStatus("Random", p.Attempts, p.Rate, p.Current)
 	})
 
 	generator := func(ctx context.Context) <-chan string {
@@ -404,7 +465,7 @@ func runRandomAttack(ctx context.Context, encInfo *pdf.EncryptionInfo, updateSta
 	return c.CrackWithGenerator(ctx, generator)
 }
 
-func crackWithGPU(ctx context.Context, gpuCracker *gpu.GPUCracker, wordlistFile string, updateStatus func(string, string)) cracker.Result {
+func crackWithGPU(ctx context.Context, gpuCracker *gpu.GPUCracker, wordlistFile string, updateStatus func(string, uint64, float64, string)) cracker.Result {
 	start := time.Now()
 	var attempts uint64
 
@@ -454,11 +515,9 @@ func crackWithGPU(ctx context.Context, gpuCracker *gpu.GPUCracker, wordlistFile 
 				attempts += uint64(len(batch))
 				batch = batch[:0]
 
-				if attempts%100000 == 0 {
-					elapsed := time.Since(start)
-					rate := float64(attempts) / elapsed.Seconds()
-					updateStatus("Wordlist", fmt.Sprintf("[GPU] %d @ %.0f/s", attempts, rate))
-				}
+				elapsed := time.Since(start)
+				rate := float64(attempts) / elapsed.Seconds()
+				updateStatus("Wordlist", attempts, rate, "[GPU]")
 			}
 		}
 	}
