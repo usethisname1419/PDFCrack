@@ -2,6 +2,8 @@ package pdf
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/md5"
 	"encoding/binary"
 	"errors"
@@ -27,8 +29,12 @@ type EncryptionInfo struct {
 }
 
 func (e *EncryptionInfo) String() string {
-	return fmt.Sprintf("PDF %s, V%d R%d, %d-bit key, AES=%v", 
-		e.PDFVersion, e.Version, e.Revision, e.Length, e.IsAES)
+	algo := "RC4"
+	if e.IsAES {
+		algo = "AES"
+	}
+	return fmt.Sprintf("PDF %s, V%d R%d, %d-bit %s", 
+		e.PDFVersion, e.Version, e.Revision, e.Length, algo)
 }
 
 var (
@@ -113,8 +119,33 @@ func parseEncryptDict(data []byte, info *EncryptionInfo) error {
 		info.UserHash = parseHexOrLiteral(uMatch[1])
 	}
 
-	cfmMatch := regexp.MustCompile(`/CFM\s*/AESV[23]`).FindSubmatch(data)
-	info.IsAES = cfmMatch != nil
+	info.IsAES = false
+	
+	cfmMatch := regexp.MustCompile(`/CFM\s*/AESV2`).FindSubmatch(data)
+	if cfmMatch != nil {
+		info.IsAES = true
+	}
+	
+	cfmMatch3 := regexp.MustCompile(`/CFM\s*/AESV3`).FindSubmatch(data)
+	if cfmMatch3 != nil {
+		info.IsAES = true
+	}
+
+	stmFMatch := regexp.MustCompile(`/StmF\s*/StdCF`).FindSubmatch(data)
+	strFMatch := regexp.MustCompile(`/StrF\s*/StdCF`).FindSubmatch(data)
+	if stmFMatch != nil || strFMatch != nil {
+		aesInCF := regexp.MustCompile(`/StdCF\s*<<[^>]*?/CFM\s*/AESV2`).FindSubmatch(data)
+		if aesInCF != nil {
+			info.IsAES = true
+		}
+	}
+
+	encryptMetaMatch := regexp.MustCompile(`/EncryptMetadata\s+(true|false)`).FindSubmatch(data)
+	if encryptMetaMatch != nil {
+		info.EncryptMeta = string(encryptMetaMatch[1]) == "true"
+	} else {
+		info.EncryptMeta = true
+	}
 
 	if info.Version == 0 {
 		info.Version = 1
@@ -127,7 +158,7 @@ func parseEncryptDict(data []byte, info *EncryptionInfo) error {
 }
 
 func parseFileID(data []byte, info *EncryptionInfo) error {
-	idMatch := regexp.MustCompile(`/ID\s*\[\s*[<(]([^>)]+)[>)]\s*[<(]([^>)]+)[>)]`).FindSubmatch(data)
+	idMatch := regexp.MustCompile(`/ID\s*\[\s*[<(]([^>)]+)[>)]`).FindSubmatch(data)
 	if idMatch != nil {
 		info.FileID = parseHexOrLiteral(idMatch[1])
 	}
@@ -138,7 +169,15 @@ func parseHexOrLiteral(data []byte) []byte {
 	s := string(data)
 	s = strings.TrimSpace(s)
 	
-	if len(s) > 0 && (s[0] >= '0' && s[0] <= '9' || s[0] >= 'a' && s[0] <= 'f' || s[0] >= 'A' && s[0] <= 'F') {
+	isHex := true
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			isHex = false
+			break
+		}
+	}
+	
+	if isHex && len(s) > 0 {
 		result := make([]byte, 0, len(s)/2)
 		for i := 0; i+1 < len(s); i += 2 {
 			b, err := strconv.ParseUint(s[i:i+2], 16, 8)
@@ -150,7 +189,54 @@ func parseHexOrLiteral(data []byte) []byte {
 		return result
 	}
 	
-	return []byte(s)
+	return unescapePDFString([]byte(s))
+}
+
+func unescapePDFString(data []byte) []byte {
+	result := make([]byte, 0, len(data))
+	i := 0
+	for i < len(data) {
+		if data[i] == '\\' && i+1 < len(data) {
+			switch data[i+1] {
+			case 'n':
+				result = append(result, '\n')
+				i += 2
+			case 'r':
+				result = append(result, '\r')
+				i += 2
+			case 't':
+				result = append(result, '\t')
+				i += 2
+			case '\\':
+				result = append(result, '\\')
+				i += 2
+			case '(':
+				result = append(result, '(')
+				i += 2
+			case ')':
+				result = append(result, ')')
+				i += 2
+			default:
+				if data[i+1] >= '0' && data[i+1] <= '7' {
+					octal := 0
+					j := i + 1
+					for k := 0; k < 3 && j < len(data) && data[j] >= '0' && data[j] <= '7'; k++ {
+						octal = octal*8 + int(data[j]-'0')
+						j++
+					}
+					result = append(result, byte(octal))
+					i = j
+				} else {
+					result = append(result, data[i+1])
+					i += 2
+				}
+			}
+		} else {
+			result = append(result, data[i])
+			i++
+		}
+	}
+	return result
 }
 
 var pdfPadding = []byte{
@@ -161,13 +247,22 @@ var pdfPadding = []byte{
 }
 
 func (info *EncryptionInfo) CheckPassword(password string) bool {
-	if info.Revision <= 4 {
-		return info.checkPasswordR4(password)
+	if info.Revision >= 5 {
+		return false
 	}
-	return false
+	
+	key := info.computeEncryptionKey(password)
+	if key == nil {
+		return false
+	}
+	
+	if info.IsAES {
+		return info.verifyUserPasswordAES(key)
+	}
+	return info.verifyUserPasswordRC4(key)
 }
 
-func (info *EncryptionInfo) checkPasswordR4(password string) bool {
+func (info *EncryptionInfo) computeEncryptionKey(password string) []byte {
 	paddedPassword := padPassword([]byte(password))
 	
 	h := md5.New()
@@ -202,12 +297,10 @@ func (info *EncryptionInfo) checkPasswordR4(password string) bool {
 		}
 	}
 	
-	key = key[:keyLen]
-	
-	return info.verifyUserPassword(key)
+	return key[:keyLen]
 }
 
-func (info *EncryptionInfo) verifyUserPassword(key []byte) bool {
+func (info *EncryptionInfo) verifyUserPasswordRC4(key []byte) bool {
 	if info.Revision == 2 {
 		encrypted := rc4Encrypt(key, pdfPadding)
 		return bytes.Equal(encrypted, info.UserHash)
@@ -233,6 +326,31 @@ func (info *EncryptionInfo) verifyUserPassword(key []byte) bool {
 	}
 	
 	return false
+}
+
+func (info *EncryptionInfo) verifyUserPasswordAES(key []byte) bool {
+	if len(info.UserHash) < 32 {
+		return false
+	}
+
+	iv := info.UserHash[:16]
+	encrypted := info.UserHash[16:32]
+	
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return false
+	}
+	
+	decrypted := make([]byte, 16)
+	mode := cipher.NewCBCDecrypter(block, iv)
+	mode.CryptBlocks(decrypted, encrypted)
+	
+	h := md5.New()
+	h.Write(pdfPadding)
+	h.Write(info.FileID)
+	expected := h.Sum(nil)
+	
+	return bytes.Equal(decrypted, expected)
 }
 
 func padPassword(password []byte) []byte {

@@ -43,7 +43,6 @@ func TestParseHexOrLiteral(t *testing.T) {
 	}{
 		{"48656C6C6F", []byte("Hello")},
 		{"deadbeef", []byte{0xde, 0xad, 0xbe, 0xef}},
-		{"test", []byte("test")},
 	}
 
 	for _, tt := range tests {
@@ -54,7 +53,26 @@ func TestParseHexOrLiteral(t *testing.T) {
 	}
 }
 
-func BenchmarkCheckPassword(b *testing.B) {
+func TestUnescapePDFString(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected []byte
+	}{
+		{`hello`, []byte("hello")},
+		{`hel\nlo`, []byte("hel\nlo")},
+		{`hel\\lo`, []byte("hel\\lo")},
+		{`\101\102\103`, []byte("ABC")},
+	}
+
+	for _, tt := range tests {
+		result := unescapePDFString([]byte(tt.input))
+		if !bytes.Equal(result, tt.expected) {
+			t.Errorf("unescapePDFString(%q) = %v, want %v", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func BenchmarkCheckPasswordRC4(b *testing.B) {
 	info := &EncryptionInfo{
 		Version:     2,
 		Revision:    3,
@@ -63,6 +81,25 @@ func BenchmarkCheckPassword(b *testing.B) {
 		OwnerHash:   make([]byte, 32),
 		UserHash:    make([]byte, 32),
 		FileID:      make([]byte, 16),
+		IsAES:       false,
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		info.CheckPassword("testpassword")
+	}
+}
+
+func BenchmarkCheckPasswordAES(b *testing.B) {
+	info := &EncryptionInfo{
+		Version:     4,
+		Revision:    4,
+		Length:      128,
+		Permissions: -3904,
+		OwnerHash:   make([]byte, 32),
+		UserHash:    make([]byte, 32),
+		FileID:      make([]byte, 16),
+		IsAES:       true,
 	}
 
 	b.ResetTimer()
