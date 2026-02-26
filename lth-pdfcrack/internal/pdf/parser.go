@@ -301,9 +301,6 @@ func (info *EncryptionInfo) CheckPassword(password string) bool {
 		return false
 	}
 	
-	if info.IsAES {
-		return info.verifyUserPasswordAES(key)
-	}
 	return info.verifyUserPasswordRC4(key)
 }
 
@@ -374,7 +371,7 @@ func (info *EncryptionInfo) verifyUserPasswordRC4(key []byte) bool {
 }
 
 func (info *EncryptionInfo) verifyUserPasswordAES(key []byte) bool {
-	if len(info.UserHash) < 32 {
+	if len(info.UserHash) < 16 {
 		return false
 	}
 	
@@ -384,24 +381,27 @@ func (info *EncryptionInfo) verifyUserPasswordAES(key []byte) bool {
 		key = newKey
 	}
 
-	iv := info.UserHash[:16]
-	encrypted := info.UserHash[16:32]
+	h := md5.New()
+	h.Write(pdfPadding)
+	h.Write(info.FileID)
+	hash := h.Sum(nil)
+
+	iv := make([]byte, 16)
 	
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return false
 	}
 	
-	decrypted := make([]byte, 16)
-	mode := cipher.NewCBCDecrypter(block, iv)
-	mode.CryptBlocks(decrypted, encrypted)
+	encrypted := make([]byte, 16)
+	mode := cipher.NewCBCEncrypter(block, iv)
+	mode.CryptBlocks(encrypted, hash)
+
+	if len(info.UserHash) >= 16 {
+		return bytes.Equal(encrypted[:16], info.UserHash[:16])
+	}
 	
-	h := md5.New()
-	h.Write(pdfPadding)
-	h.Write(info.FileID)
-	expected := h.Sum(nil)
-	
-	return bytes.Equal(decrypted, expected)
+	return false
 }
 
 func padPassword(password []byte) []byte {
